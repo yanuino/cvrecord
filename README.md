@@ -18,6 +18,6 @@ When running the built app, these folders are expected beside `CVRecord.exe`.
 - `src/icon_creator/icon_creator.py`: icon creation and cache loading.
 
 ## Platform and Build
-The actual source code has test under Windows 11 only.
+The actual source code has been tested under Windows 11 only.
 
 Build on Windows with the PowerShell script: `./build.ps1`.
