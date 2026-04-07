@@ -1,0 +1,13 @@
+{
+  "recommendations": [
+    "ms-python.python",          // Python language support
+    "ms-python.vscode-pylance",  // IntelliSense & type checking
+    "charliermarsh.ruff",        // Ruff linter & formatter
+    "ms-python.debugpy"          // Debugger
+  ],
+  "unwantedRecommendations": [
+    "ms-python.black-formatter",
+    "ms-python.pylint",
+    "ms-python.isort"
+  ]
+}

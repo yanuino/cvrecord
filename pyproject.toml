@@ -1,0 +1,49 @@
+[project]
+name = "cvrecord"
+version = "0.1.0"
+description = "Record video from your webcam with a simple GUI."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "customtkinter>=5.2.2",
+    "imageio-ffmpeg>=0.6.0",
+    "opencv-python>=4.13.0.92",
+    "pillow>=12.2.0",
+    "pytablericons>=1.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.3",
+    "ruff>=0.15.9",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+exclude = [
+  ".venv",
+  "venv",
+  "__pycache__",
+  "build",
+  "dist",
+  "AppIcons",
+]
+
+[tool.ruff.format]
+quote-style = "preserve"
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes (unused imports, undefined names)
+  "I",   # isort
+  "B",   # bugbear (real bugs)
+  "UP",  # pyupgrade
+  "SIM", # simplify
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
