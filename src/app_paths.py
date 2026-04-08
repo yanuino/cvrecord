@@ -25,3 +25,8 @@ def get_icons_dir() -> Path:
 def get_records_dir() -> Path:
     """Return the persistent recordings output directory."""
     return get_app_root() / "records"
+
+
+def get_settings_path() -> Path:
+    """Return the persistent settings TOML path beside the app."""
+    return get_app_root() / "settings.toml"

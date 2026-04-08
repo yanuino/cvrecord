@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import re
 import subprocess
+import time
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -15,7 +17,7 @@ import numpy as np
 from PIL import Image
 from pytablericons import outline_icon
 
-from app_paths import get_records_dir
+from app_paths import get_records_dir, get_settings_path
 from camera.camera_detection import CameraDevice, CameraMode, list_cameras as list_external_cameras
 from icon_creator.icon_creator import create_icon
 
@@ -208,6 +210,8 @@ class RecorderApp(ctk.CTk):
         self.capture_height = PREVIEW_HEIGHT
         self.capture_fps = float(CAPTURE_FPS)
         self.capture_pixel_format = "unknown"
+        self.settings_path = get_settings_path()
+        saved_settings = self._load_settings()
         self.preview_width = PREVIEW_WIDTH
         self.preview_height = PREVIEW_HEIGHT
         self.camera_devices: list[CameraDevice] = []
@@ -221,6 +225,8 @@ class RecorderApp(ctk.CTk):
             self.capture_height = best_mode.height
             self.capture_fps = best_mode.fps
             self.capture_pixel_format = best_mode.pixel_format
+
+        self._apply_saved_settings(saved_settings)
 
         self._update_preview_dimensions(self.capture_width, self.capture_height)
 
@@ -244,6 +250,8 @@ class RecorderApp(ctk.CTk):
         self.live_photo = None
         self.replay_photo = None
         self.read_failures = 0
+        self.record_elapsed_before_pause = 0.0
+        self.record_started_at: float | None = None
 
         self.filename_var = ctk.StringVar(value="recording")
         self.status_var = ctk.StringVar(value="Ready")
@@ -255,8 +263,132 @@ class RecorderApp(ctk.CTk):
         self._update_transport_button_colors()
         if not self.capture.isOpened():
             self._set_status("Webcam unavailable. Open Settings to choose another device.")
+        else:
+            self._save_settings(
+                camera_id=self.camera_index,
+                width=self.capture_width,
+                height=self.capture_height,
+                fps=self.capture_fps,
+            )
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(15, self._update_live_view)
+
+    def _load_settings(self) -> dict[str, int | float] | None:
+        """Load camera settings from TOML when available.
+
+        Returns:
+            Parsed camera settings dict, or None when unavailable/invalid.
+        """
+        if not self.settings_path.exists():
+            return None
+
+        try:
+            data = tomllib.loads(self.settings_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+
+        def parse_int_field(value: object) -> int | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value) if value.is_integer() else None
+            if isinstance(value, str):
+                try:
+                    return int(value.strip())
+                except ValueError:
+                    return None
+            return None
+
+        def parse_float_field(value: object) -> float | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int | float):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value.strip())
+                except ValueError:
+                    return None
+            return None
+
+        camera_id = parse_int_field(data.get("camera_id"))
+        width = parse_int_field(data.get("width"))
+        height = parse_int_field(data.get("height"))
+        fps = parse_float_field(data.get("fps"))
+        if camera_id is None or width is None or height is None or fps is None:
+            return None
+
+        parsed = {
+            "camera_id": camera_id,
+            "width": width,
+            "height": height,
+            "fps": fps,
+        }
+
+        if parsed["width"] <= 0 or parsed["height"] <= 0 or parsed["fps"] <= 0:
+            return None
+        return parsed
+
+    def _apply_saved_settings(self, settings: dict[str, int | float] | None) -> None:
+        """Apply persisted camera settings when valid and available.
+
+        Args:
+            settings: Persisted settings mapping or None.
+        """
+        if settings is None or not self.available_cameras:
+            return
+
+        saved_camera = int(settings["camera_id"])
+        if saved_camera in self.available_cameras:
+            self.camera_index = saved_camera
+
+        saved_width = int(settings["width"])
+        saved_height = int(settings["height"])
+        saved_fps = float(settings["fps"])
+
+        modes = self._modes_for_index(self.camera_index)
+        matching_modes = [
+            mode
+            for mode in modes
+            if mode.width == saved_width and mode.height == saved_height and abs(mode.fps - saved_fps) < 0.01
+        ]
+        if matching_modes:
+            preferred = max(
+                matching_modes,
+                key=lambda mode: 1 if mode.pixel_format.lower() in {"mjpeg", "mjpg"} else 0,
+            )
+            self.capture_width = preferred.width
+            self.capture_height = preferred.height
+            self.capture_fps = preferred.fps
+            self.capture_pixel_format = preferred.pixel_format
+            return
+
+        sizes = self._sizes_for_index(self.camera_index)
+        if (saved_width, saved_height) in sizes:
+            self.capture_width = saved_width
+            self.capture_height = saved_height
+            fps_values = self._fps_values_for(self.camera_index, saved_width, saved_height)
+            if fps_values:
+                self.capture_fps = min(fps_values, key=lambda value: abs(value - saved_fps))
+
+    def _save_settings(self, camera_id: int, width: int, height: int, fps: float) -> None:
+        """Persist current camera selection to settings.toml.
+
+        Args:
+            camera_id: Selected camera index.
+            width: Selected capture width.
+            height: Selected capture height.
+            fps: Selected capture fps.
+        """
+        records_dir = self.settings_path.parent
+        records_dir.mkdir(parents=True, exist_ok=True)
+        content = (
+            f"camera_id = {int(camera_id)}\nwidth = {int(width)}\nheight = {int(height)}\nfps = {float(fps):.2f}\n"
+        )
+        with contextlib.suppress(OSError):
+            self.settings_path.write_text(content, encoding="utf-8")
 
     def _bind_shortcuts(self) -> None:
         """Register keyboard shortcuts for common actions."""
@@ -549,6 +681,12 @@ class RecorderApp(ctk.CTk):
         self._set_status(
             f"Camera {self.camera_index} set to {self.capture_width}x{self.capture_height} @ {self.capture_fps:.2f} fps"
         )
+        self._save_settings(
+            camera_id=self.camera_index,
+            width=self.capture_width,
+            height=self.capture_height,
+            fps=self.capture_fps,
+        )
         return True
 
     def _open_settings_dialog(self) -> None:
@@ -689,12 +827,78 @@ class RecorderApp(ctk.CTk):
         self.last_replay_frame = None
         self._show_replay(blank)
 
+    def _format_duration(self, seconds: float) -> str:
+        """Format elapsed seconds as HH:MM:SS."""
+        total = max(0, int(seconds))
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def _overlay_timer(self, frame_bgr: np.ndarray, label: str) -> np.ndarray:
+        """Draw a timer badge centered near the bottom of the preview."""
+        frame = frame_bgr.copy()
+        frame_h, frame_w = frame.shape[:2]
+        if frame_h <= 0 or frame_w <= 0:
+            return frame
+
+        scale_ratio = max(0.5, frame_w / max(1.0, float(self.preview_width)))
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = max(0.6, 0.72 * scale_ratio)
+        thickness = max(1, int(round(2 * scale_ratio)))
+        margin_y = int(round(12 * scale_ratio))
+        (text_w, text_h), baseline = cv2.getTextSize(label, font, scale, thickness)
+
+        pad_x = int(round(8 * scale_ratio))
+        pad_y = int(round(6 * scale_ratio))
+
+        badge_w = text_w + (2 * pad_x)
+        badge_h = text_h + baseline + (2 * pad_y)
+
+        x1 = (frame_w - badge_w) // 2
+        y2 = frame_h - margin_y
+        x2 = x1 + badge_w
+        y1 = y2 - badge_h
+
+        # Clamp badge inside frame bounds to avoid off-screen drawing.
+        x1 = max(0, min(x1, frame_w - 1))
+        x2 = max(x1 + 1, min(x2, frame_w - 1))
+        y1 = max(0, min(y1, frame_h - 1))
+        y2 = max(y1 + 1, min(y2, frame_h - 1))
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), thickness=-1)
+        text_x = min(x2 - 1, x1 + pad_x)
+        text_y = min(y2 - baseline - 1, y1 + pad_y + text_h)
+        cv2.putText(
+            frame,
+            label,
+            (text_x, text_y),
+            font,
+            scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
+        return frame
+
+    def _current_record_elapsed(self) -> float:
+        """Return total recorded time, including resumed segments."""
+        if self.record_state == "recording" and self.record_started_at is not None:
+            return self.record_elapsed_before_pause + (time.monotonic() - self.record_started_at)
+        return self.record_elapsed_before_pause
+
     def _update_live_view(self) -> None:
         ok, frame = safe_camera_read(self.capture)
         if ok and frame is not None:
             self.read_failures = 0
             self.last_live_frame = frame
-            self._show_live(frame)
+
+            live_frame = frame
+            if self.record_state in {"recording", "paused"}:
+                elapsed_text = self._format_duration(self._current_record_elapsed())
+                prefix = "REC" if self.record_state == "recording" else "PAUSE"
+                live_frame = self._overlay_timer(live_frame, f"{prefix} {elapsed_text}")
+
+            self._show_live(live_frame)
 
             if not self._initial_focus_done:
                 self._initial_focus_done = True
@@ -719,10 +923,12 @@ class RecorderApp(ctk.CTk):
             self.recorded_frames.clear()
             self.last_replay_frame = None
             self._stop_playback()
+            self.record_elapsed_before_pause = 0.0
             self._set_status("Recording started")
         else:
             self._set_status("Recording resumed")
 
+        self.record_started_at = time.monotonic()
         self.record_state = "recording"
         self._update_transport_button_colors()
         self._focus_name_entry()
@@ -733,6 +939,9 @@ class RecorderApp(ctk.CTk):
             self._focus_name_entry()
             return
 
+        if self.record_started_at is not None:
+            self.record_elapsed_before_pause += time.monotonic() - self.record_started_at
+        self.record_started_at = None
         self.record_state = "paused"
         self._update_transport_button_colors()
         self._set_status("Recording paused")
@@ -769,13 +978,19 @@ class RecorderApp(ctk.CTk):
         if self.play_index >= len(self.recorded_frames):
             self.is_playing = False
             self._play_job = None
+            if self.recorded_frames:
+                final_frame = self.recorded_frames[-1]
+                self.last_replay_frame = final_frame
+                self._show_replay(final_frame)
             self._update_transport_button_colors()
             self._set_status("Playback finished")
             return
 
         frame = self.recorded_frames[self.play_index]
+        elapsed = self.play_index / max(1.0, self.capture_fps)
+        replay_frame = self._overlay_timer(frame, f"PLAY {self._format_duration(elapsed)}")
         self.last_replay_frame = frame
-        self._show_replay(frame)
+        self._show_replay(replay_frame)
         self.play_index += 1
         delay_ms = max(1, round(1000 / max(1.0, self.capture_fps)))
         self._play_job = self.after(delay_ms, self._playback_tick)
@@ -785,10 +1000,18 @@ class RecorderApp(ctk.CTk):
         if self._play_job is not None:
             self.after_cancel(self._play_job)
             self._play_job = None
+
+        if self.recorded_frames:
+            frame_index = max(0, min(self.play_index - 1, len(self.recorded_frames) - 1))
+            plain_frame = self.recorded_frames[frame_index]
+            self.last_replay_frame = plain_frame
+            self._show_replay(plain_frame)
         self._update_transport_button_colors()
 
     def _on_revert(self) -> None:
         self._clear_current_capture()
+        self.record_elapsed_before_pause = 0.0
+        self.record_started_at = None
         self._set_status("Current recording discarded")
         self._focus_name_entry()
 
